@@ -1,0 +1,32 @@
+# Compiled EXEs
+*.exe
+
+# Screenshots and images
+*.jpeg
+*.jpg
+*.png
+
+# Build artifacts
+deploy/*.exe
+
+# Local test configs
+config-test*.json
+config-continuous.json
+
+# Old root-level files (migrated to deploy/)
+/HFMonitor.ps1
+/HFDashboard.ps1
+/Install-HFMonitor.ps1
+/Build-EXE.ps1
+/0-Test-Once.bat
+/1-Build-EXE.bat
+/2-Install-and-Start.bat
+/Open-Dashboard.bat
+/Uninstall.bat
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
