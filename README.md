@@ -1,134 +1,77 @@
 # Workstation Monitor
 
-A lightweight PowerShell-based monitoring solution for Windows workstations. Collects CPU, memory, network, and latency metrics with a web-based dashboard.
+A lightweight, internal monitoring solution for Windows workstations. Built with PowerShell, zero licensing costs, minimal resource usage.
 
-## Features
+## Why This Exists
 
-- **Low overhead** - Runs silently in the background as a scheduled task
-- **No dependencies** - Compiles to standalone EXE using ps2exe
-- **Centralized dashboard** - View all workstations from a single web interface
-- **Network share sync** - Optionally sync metrics to a shared folder
-- **Real-time alerts** - High CPU, memory, latency warnings
-- **Process tracking** - Top CPU and memory consumers per workstation
-- **User tracking** - See who's logged into each workstation
+Commercial monitoring tools charge **per device per month**. For 40+ workstations, that adds up fast. This tool provides the visibility we need for troubleshooting without the cost.
+
+## Key Points
+
+- **Internal only** - All data stays on your network. Metrics are written to a local folder and optionally synced to an internal file share. No external services, no cloud, no data leaves your environment.
+- **Minimal footprint** - Single lightweight EXE (~50KB), runs in background, negligible CPU/memory impact. Won't interfere with clinical workflows.
+- **Simple setup** - Copy 4 files, double-click install. No agents, no server infrastructure, no database.
+- **Zero cost** - Pure PowerShell compiled to EXE. No licenses, no subscriptions.
+
+## What It Collects
+
+Basic performance metrics for troubleshooting:
+- CPU and memory utilization
+- Network latency to key systems
+- Top resource-consuming processes
+- Currently logged-in user
+
+**No sensitive data** - No patient info, no credentials, no browsing history, no keystrokes.
 
 ## Quick Start
 
-### 1. Build the EXEs
-
+### 1. Build (one time)
 ```batch
 cd deploy
 1-Build-Monitor.bat      # Creates WorkstationMonitor.exe
 2-Build-Dashboard.bat    # Creates Dashboard.exe
 ```
 
-### 2. Configure (Optional)
+### 2. Deploy to Workstations
 
-Edit `deploy/config.json`:
-```json
-{
-    "IntervalSeconds": 60,
-    "OutputPath": "C:\\ProgramData\\WorkstationMonitor",
-    "SharedPath": "\\\\server\\share\\metrics",
-    "LatencyTargets": ["8.8.8.8", "1.1.1.1"],
-    "RetentionHours": 72
-}
-```
-
-### 3. Deploy to Workstations
-
-Copy these files to each workstation:
+Copy to each workstation:
 - `3-Install.bat`
 - `Install-Monitor.ps1`
 - `WorkstationMonitor.exe`
 - `config.json`
 
-Run `3-Install.bat` (requires admin for scheduled task).
+Double-click `3-Install.bat` (requires admin).
 
-### 4. View Dashboard
+### 3. View Dashboard
 
-Double-click `Dashboard.exe` and open `http://localhost:9090`
+Double-click `Dashboard.exe` → opens `http://localhost:9090`
 
-## Configuration Options
+## Configuration
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| IntervalSeconds | 60 | Collection interval in seconds |
-| OutputPath | C:\ProgramData\WorkstationMonitor | Local data storage |
-| SharedPath | "" | Network share for centralized metrics |
-| LatencyTargets | ["8.8.8.8"] | Hosts to ping for latency |
-| DicomHosts | [] | DICOM/PACS hosts to check connectivity |
-| DicomPort | 104 | DICOM port |
-| RetentionHours | 72 | History retention |
+Edit `config.json` before deploying:
+
+```json
+{
+    "IntervalSeconds": 60,
+    "OutputPath": "C:\\ProgramData\\WorkstationMonitor",
+    "SharedPath": "\\\\yourserver\\share\\metrics",
+    "LatencyTargets": ["your-pacs-server", "8.8.8.8"],
+    "RetentionHours": 72
+}
+```
 
 ## Dashboard Features
 
 - Search by PC name or logged-in user
-- Filter by High CPU, High Memory, High Latency
-- Dismiss offline alerts
-- Click workstation for detailed view with graphs
+- Filter by high CPU, memory, or latency
+- Click workstation for detailed graphs
 - Export to CSV
-
-## File Structure
-
-```
-deploy/
-├── WorkstationMonitor.ps1   # Monitor source
-├── Dashboard.ps1            # Dashboard source
-├── Install-Monitor.ps1      # Installation script
-├── Build-Monitor.ps1        # Build monitor EXE
-├── Build-Dashboard.ps1      # Build dashboard EXE
-├── config.json              # Configuration template
-├── 1-Build-Monitor.bat      # Build monitor
-├── 2-Build-Dashboard.bat    # Build dashboard
-├── 3-Install.bat            # Install on workstation
-├── Uninstall.bat            # Remove from workstation
-└── DEPLOYMENT-GUIDE.md      # Deployment instructions
-```
-
-## Managing the Monitor
-
-### Check if Running
-```powershell
-Get-Process -Name "WorkstationMonitor"
-```
-
-### Stop the Monitor
-```powershell
-Get-Process -Name "WorkstationMonitor" | Stop-Process
-```
-
-### Start Manually
-```powershell
-Start-ScheduledTask -TaskName "WorkstationMonitor"
-```
-
-### View Task Status
-```powershell
-Get-ScheduledTask -TaskName "WorkstationMonitor" | Select-Object State
-```
 
 ## Requirements
 
-- Windows 10/11 or Windows Server 2016+
-- PowerShell 5.1+
-- ps2exe module (auto-installed during build)
-
-## Troubleshooting
-
-### "ps2exe not found" error
-Run this in PowerShell first:
-```powershell
-Install-Module -Name ps2exe -Scope CurrentUser -Force
-```
-
-### EXE not starting
-Check the log file: `C:\ProgramData\WorkstationMonitor\monitor.log`
-
-### No data being collected
-1. Make sure EXE is running: `Get-Process -Name "WorkstationMonitor"`
-2. Check if `metrics.json` exists in output folder
-3. Review `monitor.log` for errors
+- Windows 10/11 or Server 2016+
+- PowerShell 5.1+ (built into Windows)
+- Write access to a network share (for centralized view)
 
 ## License
 
