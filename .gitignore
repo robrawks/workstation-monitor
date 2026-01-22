@@ -7,13 +7,16 @@
 *.png
 
 # Build artifacts
-deploy/*.exe
+prod/*.exe
+
+# HF-specific deployment (not public)
+hfmonitorDeployment/
 
 # Local test configs
 config-test*.json
 config-continuous.json
 
-# Old root-level files (migrated to deploy/)
+# Old root-level files (migrated to prod/)
 /HFMonitor.ps1
 /HFDashboard.ps1
 /Install-HFMonitor.ps1
