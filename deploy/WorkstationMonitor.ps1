@@ -97,17 +97,22 @@ function Write-Log {
 # Metric Collection Functions
 # =============================================================================
 
+# Cache core count - doesn't change at runtime
+$Script:CachedCoreCount = $null
+
 function Get-CPUMetrics {
     try {
         $cpuCounter = Get-Counter '\Processor(_Total)\% Processor Time' -ErrorAction SilentlyContinue
-        $cpuPercent = if ($cpuCounter) { 
-            [math]::Round($cpuCounter.CounterSamples[0].CookedValue, 1) 
-        } else { 
-            $allCpu = (Get-Process | Measure-Object -Property CPU -Sum).Sum
-            [math]::Min(100, [math]::Round($allCpu / 10, 1))
+        $cpuPercent = if ($cpuCounter) {
+            [math]::Round($cpuCounter.CounterSamples[0].CookedValue, 1)
+        } else {
+            0
         }
-        
-        $topProcesses = Get-Process | 
+
+        # Get only what we need: ProcessName, Id, CPU, WorkingSet64
+        $processes = Get-Process | Select-Object ProcessName, Id, CPU, WorkingSet64
+
+        $topCPU = $processes |
             Where-Object { $_.CPU -gt 0 } |
             Sort-Object CPU -Descending |
             Select-Object -First 5 |
@@ -119,15 +124,19 @@ function Get-CPUMetrics {
                     Memory_MB = [math]::Round($_.WorkingSet64 / 1MB, 1)
                 }
             }
-        
-        $coreCount = (Get-CimInstance -ClassName Win32_Processor -ErrorAction SilentlyContinue | 
-            Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
-        if (-not $coreCount) { $coreCount = $env:NUMBER_OF_PROCESSORS }
-        
+
+        # Cache core count
+        if (-not $Script:CachedCoreCount) {
+            $Script:CachedCoreCount = $env:NUMBER_OF_PROCESSORS
+        }
+
+        # Clear process list immediately
+        $processes = $null
+
         return @{
             OverallPercent = $cpuPercent
-            CoreCount = $coreCount
-            TopConsumers = @($topProcesses)
+            CoreCount = $Script:CachedCoreCount
+            TopConsumers = @($topCPU)
         }
     }
     catch {
@@ -143,14 +152,20 @@ function Get-CPUMetrics {
 
 function Get-MemoryMetrics {
     try {
-        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-        
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop -Property TotalVisibleMemorySize, FreePhysicalMemory
+
         $totalGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
         $freeGB = [math]::Round($os.FreePhysicalMemory / 1MB, 2)
         $usedGB = [math]::Round($totalGB - $freeGB, 2)
         $percentUsed = [math]::Round(($usedGB / $totalGB) * 100, 1)
-        
-        $topProcesses = Get-Process | 
+
+        # Dispose CIM object
+        $os = $null
+
+        # Get only what we need
+        $processes = Get-Process | Select-Object ProcessName, Id, WorkingSet64, PrivateMemorySize64
+
+        $topMem = $processes |
             Sort-Object WorkingSet64 -Descending |
             Select-Object -First 5 |
             ForEach-Object {
@@ -161,13 +176,16 @@ function Get-MemoryMetrics {
                     PrivateMemory_MB = [math]::Round($_.PrivateMemorySize64 / 1MB, 1)
                 }
             }
-        
+
+        # Clear process list immediately
+        $processes = $null
+
         return @{
             Total_GB = $totalGB
             Used_GB = $usedGB
             Available_GB = $freeGB
             PercentUsed = $percentUsed
-            TopConsumers = @($topProcesses)
+            TopConsumers = @($topMem)
         }
     }
     catch {
@@ -349,24 +367,27 @@ function Test-DicomConnectivity {
 
 function Get-SystemInfo {
     try {
-        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue -Property LastBootUpTime, Caption
         $uptime = if ($os) {
             [math]::Round(((Get-Date) - $os.LastBootUpTime).TotalHours, 1)
         } else { 0 }
+        $osCaption = $os.Caption
+        $os = $null  # Dispose
 
         $ip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
             Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' } |
             Select-Object -First 1).IPAddress
 
         # Get logged-in user (works even when running as SYSTEM)
-        $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
+        $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue -Property UserName
         $loggedInUser = if ($cs.UserName) { $cs.UserName } else { "No user logged in" }
+        $cs = $null  # Dispose
 
         return @{
             Hostname = $env:COMPUTERNAME
             LoggedInUser = $loggedInUser
             IPAddress = $ip
-            OSVersion = $os.Caption
+            OSVersion = $osCaption
             UptimeHours = $uptime
         }
     }
@@ -448,8 +469,12 @@ function Save-Metrics {
 
     $Metrics | ConvertTo-Json -Depth 10 | Set-Content $currentFile -Force
 
-    $historyFile = Join-Path $Script:Config.OutputPath $Script:Config.HistoryFile
+    # Skip detailed history file - RecentHistory in metrics.json is sufficient for dashboard
+    # This avoids loading/parsing potentially huge history file every cycle
+    # If full history is needed, enable by uncommenting below
 
+    <#
+    $historyFile = Join-Path $Script:Config.OutputPath $Script:Config.HistoryFile
     $history = @()
     if (Test-Path $historyFile) {
         try {
@@ -463,14 +488,13 @@ function Save-Metrics {
             $history = @()
         }
     }
-
     $history += $Metrics
-
     if ($history.Count -gt $Script:Config.MaxHistoryRecords) {
         $history = $history | Select-Object -Last $Script:Config.MaxHistoryRecords
     }
-
     $history | ConvertTo-Json -Depth 10 | Set-Content $historyFile -Force
+    $history = $null
+    #>
 
     if ($Script:Config.SharedPath -and (Test-Path $Script:Config.SharedPath)) {
         try {
@@ -515,6 +539,7 @@ if ($Script:Config.RunOnce) {
 }
 
 # Continuous monitoring mode (background)
+$Script:LoopCount = 0
 while ($true) {
     try {
         $metrics = Get-AllMetrics
@@ -524,6 +549,18 @@ while ($true) {
     catch {
         Write-Log "Collection error: $_" "ERROR"
     }
-    
+
+    # Aggressive cleanup to prevent memory leak
+    $metrics = $null
+    $Script:LoopCount++
+
+    # Force GC every cycle, full collection every 10 cycles
+    if ($Script:LoopCount % 10 -eq 0) {
+        [System.GC]::Collect(2, [System.GCCollectionMode]::Forced, $true)
+        [System.GC]::WaitForPendingFinalizers()
+    } else {
+        [System.GC]::Collect()
+    }
+
     Start-Sleep -Seconds $Script:Config.IntervalSeconds
 }

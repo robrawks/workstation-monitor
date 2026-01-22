@@ -1,0 +1,10 @@
+{
+    "IntervalSeconds": 60,
+    "OutputPath": "C:\\ProgramData\\HFMonitor",
+    "SharedPath": "",
+    "LatencyTargets": ["8.8.8.8", "1.1.1.1"],
+    "DicomHosts": [],
+    "DicomPort": 104,
+    "RetentionHours": 72,
+    "RunOnce": false
+}
