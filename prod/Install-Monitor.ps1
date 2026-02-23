@@ -182,11 +182,8 @@ if (Test-Path $SyncExe) {
         $SyncAction = New-ScheduledTaskAction -Execute $SyncExe -WorkingDirectory $InstallPath
         $SyncTrigger = New-ScheduledTaskTrigger -AtLogon
 
-        # Run as any logged-in user (not just the installing admin)
-        $SyncPrincipal = New-ScheduledTaskPrincipal `
-            -GroupId "BUILTIN\Users" `
-            -RunLevel Limited
-
+        # Run as the installing admin user with "run whether logged on or not"
+        # This allows the sync to run in the background using stored credentials
         $SyncSettings = New-ScheduledTaskSettingsSet `
             -AllowStartIfOnBatteries `
             -DontStopIfGoingOnBatteries `
@@ -199,10 +196,12 @@ if (Test-Path $SyncExe) {
             -Action $SyncAction `
             -Trigger $SyncTrigger `
             -Settings $SyncSettings `
-            -Principal $SyncPrincipal `
+            -User $env:USERNAME `
+            -RunLevel Highest `
             -Description "Workstation Monitor Sync - Copies metrics to network share" | Out-Null
 
-        Write-Host "      Sync task created (runs at any user logon for share access)" -ForegroundColor Green
+        Write-Host "      Sync task created (runs as $env:USERNAME at logon)" -ForegroundColor Green
+        Write-Host "      NOTE: Windows may prompt for your password to store credentials" -ForegroundColor Yellow
     } catch {
         Write-Host "      Warning: Could not create sync task (non-critical)" -ForegroundColor Yellow
     }
