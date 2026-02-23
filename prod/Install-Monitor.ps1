@@ -170,41 +170,14 @@ catch {
     Write-Host "Created startup shortcut instead: $ShortcutPath" -ForegroundColor Cyan
 }
 
-# Step 4b: Create sync task (runs as logged-in user for network share access)
+# Note: SyncMetrics.exe is copied to the install folder.
+# Create a scheduled task manually in Task Scheduler to run it.
+# It syncs local metrics to the network share every 60 seconds.
 $SyncExe = Join-Path $InstallPath "SyncMetrics.exe"
 if (Test-Path $SyncExe) {
-    Write-Host "[4b/5] Creating sync task..." -ForegroundColor Yellow
-
-    $SyncTaskName = "WorkstationMonitorSync"
-    Unregister-ScheduledTask -TaskName $SyncTaskName -Confirm:$false -ErrorAction SilentlyContinue
-
-    try {
-        $SyncAction = New-ScheduledTaskAction -Execute $SyncExe -WorkingDirectory $InstallPath
-        $SyncTrigger = New-ScheduledTaskTrigger -AtLogon
-
-        # Run as the installing admin user with "run whether logged on or not"
-        # This allows the sync to run in the background using stored credentials
-        $SyncSettings = New-ScheduledTaskSettingsSet `
-            -AllowStartIfOnBatteries `
-            -DontStopIfGoingOnBatteries `
-            -StartWhenAvailable `
-            -RestartCount 3 `
-            -RestartInterval (New-TimeSpan -Minutes 1) `
-            -ExecutionTimeLimit (New-TimeSpan -Days 365)
-
-        Register-ScheduledTask -TaskName $SyncTaskName `
-            -Action $SyncAction `
-            -Trigger $SyncTrigger `
-            -Settings $SyncSettings `
-            -User $env:USERNAME `
-            -RunLevel Highest `
-            -Description "Workstation Monitor Sync - Copies metrics to network share" | Out-Null
-
-        Write-Host "      Sync task created (runs as $env:USERNAME at logon)" -ForegroundColor Green
-        Write-Host "      NOTE: Windows may prompt for your password to store credentials" -ForegroundColor Yellow
-    } catch {
-        Write-Host "      Warning: Could not create sync task (non-critical)" -ForegroundColor Yellow
-    }
+    Write-Host ""
+    Write-Host "  SyncMetrics is available at: $SyncExe" -ForegroundColor Cyan
+    Write-Host "  Create a scheduled task manually to sync metrics to the share." -ForegroundColor Yellow
 }
 
 # Step 5: Create helper shortcuts
