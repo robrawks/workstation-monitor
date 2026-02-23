@@ -496,18 +496,8 @@ function Save-Metrics {
     $history = $null
     #>
 
-    if ($Script:Config.SharedPath) {
-        try {
-            if (-not (Test-Path $Script:Config.SharedPath)) {
-                Write-Log "SharedPath not accessible: $($Script:Config.SharedPath) - check share permissions for computer account ($env:COMPUTERNAME`$)" "WARN"
-            } else {
-                $sharedFile = Join-Path $Script:Config.SharedPath "$($env:COMPUTERNAME).json"
-                $Metrics | ConvertTo-Json -Depth 10 | Set-Content $sharedFile -Force
-            }
-        } catch {
-            Write-Log "Failed to save to shared path: $_ - if running as SYSTEM, ensure share grants write to computer account ($env:COMPUTERNAME`$)" "WARN"
-        }
-    }
+    # SharedPath sync is handled by SyncMetrics.exe (runs as logged-in user)
+    # The monitor runs as SYSTEM which typically cannot access network shares
 }
 
 # =============================================================================

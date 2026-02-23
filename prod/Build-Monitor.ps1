@@ -61,7 +61,7 @@ Import-Module ps2exe -Force
 Write-Host "      Module loaded" -ForegroundColor Green
 
 # Step 3: Compile to EXE
-Write-Host "[3/3] Compiling WorkstationMonitor.exe..." -ForegroundColor Yellow
+Write-Host "[3/4] Compiling WorkstationMonitor.exe..." -ForegroundColor Yellow
 
 try {
     # Compile with these options:
@@ -86,6 +86,30 @@ try {
 catch {
     Write-Error "Compilation failed: $_"
     exit 1
+}
+
+# Step 4: Compile SyncMetrics.exe
+$SyncSource = Join-Path $ScriptDir "SyncMetrics.ps1"
+$SyncExe = Join-Path $ScriptDir "SyncMetrics.exe"
+
+if (Test-Path $SyncSource) {
+    Write-Host "[4/4] Compiling SyncMetrics.exe..." -ForegroundColor Yellow
+    try {
+        Invoke-PS2EXE -InputFile $SyncSource `
+                      -OutputFile $SyncExe `
+                      -NoConsole `
+                      -Title "Workstation Monitor Sync" `
+                      -Company "Your Organization" `
+                      -Product "SyncMetrics" `
+                      -Version "1.1.0.0" `
+                      -Copyright "Your IT Team" `
+                      -Description "Syncs metrics to network share"
+        Write-Host "      SyncMetrics.exe compiled" -ForegroundColor Green
+    } catch {
+        Write-Warning "SyncMetrics compilation failed (non-critical): $_"
+    }
+} else {
+    Write-Host "[4/4] SyncMetrics.ps1 not found, skipping..." -ForegroundColor Gray
 }
 
 # Verify output

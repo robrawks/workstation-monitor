@@ -42,8 +42,9 @@ if ($Uninstall) {
     # Stop any running instance
     Get-Process -Name "WorkstationMonitor" -ErrorAction SilentlyContinue | Stop-Process -Force
     
-    # Remove scheduled task
+    # Remove scheduled tasks
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName "${TaskName}Sync" -Confirm:$false -ErrorAction SilentlyContinue
     
     Write-Host "  Scheduled task removed" -ForegroundColor Green
     Write-Host ""
@@ -97,6 +98,10 @@ Write-Host "[3/5] Copying files..." -ForegroundColor Yellow
 Copy-Item -Path $ExePath -Destination $InstallPath -Force
 if (Test-Path $ConfigPath) {
     Copy-Item -Path $ConfigPath -Destination $InstallPath -Force
+}
+$SyncExePath = Join-Path $ScriptDir "SyncMetrics.exe"
+if (Test-Path $SyncExePath) {
+    Copy-Item -Path $SyncExePath -Destination $InstallPath -Force
 }
 Write-Host "      Files copied" -ForegroundColor Green
 
@@ -165,6 +170,37 @@ catch {
     Write-Host "Created startup shortcut instead: $ShortcutPath" -ForegroundColor Cyan
 }
 
+# Step 4b: Create sync task (runs as logged-in user for network share access)
+$SyncExe = Join-Path $InstallPath "SyncMetrics.exe"
+if (Test-Path $SyncExe) {
+    Write-Host "[4b/5] Creating sync task..." -ForegroundColor Yellow
+
+    $SyncTaskName = "WorkstationMonitorSync"
+    Unregister-ScheduledTask -TaskName $SyncTaskName -Confirm:$false -ErrorAction SilentlyContinue
+
+    try {
+        $SyncAction = New-ScheduledTaskAction -Execute $SyncExe -WorkingDirectory $InstallPath
+        $SyncTrigger = New-ScheduledTaskTrigger -AtLogon
+        $SyncSettings = New-ScheduledTaskSettingsSet `
+            -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries `
+            -StartWhenAvailable `
+            -RestartCount 3 `
+            -RestartInterval (New-TimeSpan -Minutes 1) `
+            -ExecutionTimeLimit (New-TimeSpan -Days 365)
+
+        Register-ScheduledTask -TaskName $SyncTaskName `
+            -Action $SyncAction `
+            -Trigger $SyncTrigger `
+            -Settings $SyncSettings `
+            -Description "Workstation Monitor Sync - Copies metrics to network share" | Out-Null
+
+        Write-Host "      Sync task created (runs at user logon for share access)" -ForegroundColor Green
+    } catch {
+        Write-Host "      Warning: Could not create sync task (non-critical)" -ForegroundColor Yellow
+    }
+}
+
 # Step 5: Create helper shortcuts
 Write-Host "[5/5] Creating shortcuts..." -ForegroundColor Yellow
 
@@ -198,6 +234,7 @@ Write-Host "  - Start automatically at system boot (runs as SYSTEM)" -Foreground
 Write-Host "  - Persist across all user sessions (admin, rad, etc.)" -ForegroundColor White
 Write-Host "  - Run silently in the background" -ForegroundColor White
 Write-Host "  - Save metrics to $InstallPath" -ForegroundColor White
+Write-Host "  - Sync metrics to network share when a user is logged in" -ForegroundColor White
 Write-Host ""
 
 # Start now if requested
