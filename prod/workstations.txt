@@ -1,0 +1,4 @@
+# Workstation hostnames - one per line
+# Changes take effect on next dashboard refresh (no restart needed)
+# WSRAD001
+# WSRAD002
