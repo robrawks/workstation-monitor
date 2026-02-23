@@ -924,7 +924,7 @@ $DashboardHTML = @'
                 
                 // Latency rows
                 const latencyRows = (m.Latency || []).map(lat => {
-                    const latClass = getStatusClass(lat.AvgLatency_ms, 50, 100);
+                    const latClass = getStatusClass(lat.AvgLatency_ms, CONFIG.thresholds.latency.warning, CONFIG.thresholds.latency.critical);
                     return `
                         <div class="latency-row">
                             <span class="latency-target">${escapeHtml(lat.Target)}</span>

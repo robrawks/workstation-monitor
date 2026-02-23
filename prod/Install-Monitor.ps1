@@ -4,10 +4,10 @@
 
 .DESCRIPTION
     Creates a Windows Scheduled Task that:
-    - Starts WorkstationMonitor.exe at user logon
+    - Starts WorkstationMonitor.exe at system startup (runs as SYSTEM)
     - Runs hidden in the background
     - Restarts if it crashes
-    - Runs as the current user (no admin needed for basic install)
+    - Runs as NT AUTHORITY\SYSTEM (persists across user sessions)
 
 .PARAMETER Uninstall
     Remove the scheduled task and stop the monitor
@@ -115,8 +115,14 @@ try {
     # Create the action - run the EXE from the install path
     $Action = New-ScheduledTaskAction -Execute $InstalledExe -WorkingDirectory $InstallPath
 
-    # Trigger: at user logon (runs as logged-in user for share access)
-    $Trigger = New-ScheduledTaskTrigger -AtLogon
+    # Trigger: at system startup (runs as SYSTEM, independent of user sessions)
+    $Trigger = New-ScheduledTaskTrigger -AtStartup
+
+    # Run as SYSTEM - persists across user logon/logoff, survives reboots
+    $Principal = New-ScheduledTaskPrincipal `
+        -UserId "NT AUTHORITY\SYSTEM" `
+        -LogonType ServiceAccount `
+        -RunLevel Highest
 
     # Settings for reliable background operation
     $Settings = New-ScheduledTaskSettingsSet `
@@ -132,9 +138,10 @@ try {
         -Action $Action `
         -Trigger $Trigger `
         -Settings $Settings `
+        -Principal $Principal `
         -Description "Workstation Monitor - Background performance monitoring" | Out-Null
 
-    Write-Host "      Scheduled task created (runs at user logon)" -ForegroundColor Green
+    Write-Host "      Scheduled task created (runs at system startup as SYSTEM)" -ForegroundColor Green
 }
 catch {
     Write-Warning "Could not create scheduled task automatically."
@@ -187,7 +194,8 @@ Write-Host ""
 Write-Host "Install location: $InstallPath" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "The monitor will:" -ForegroundColor Yellow
-Write-Host "  - Start automatically when any user logs in" -ForegroundColor White
+Write-Host "  - Start automatically at system boot (runs as SYSTEM)" -ForegroundColor White
+Write-Host "  - Persist across all user sessions (admin, rad, etc.)" -ForegroundColor White
 Write-Host "  - Run silently in the background" -ForegroundColor White
 Write-Host "  - Save metrics to $InstallPath" -ForegroundColor White
 Write-Host ""
@@ -215,7 +223,7 @@ else {
     Write-Host "To start now, run:" -ForegroundColor Yellow
     Write-Host "  Start-ScheduledTask -TaskName 'WorkstationMonitor'" -ForegroundColor Gray
     Write-Host ""
-    Write-Host "Or just log out and back in." -ForegroundColor Gray
+    Write-Host "Or restart the computer." -ForegroundColor Gray
 }
 
 Write-Host ""
