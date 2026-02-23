@@ -37,15 +37,26 @@ if (Test-Path $ConfigFile) {
     } catch { }
 }
 
+# Validate IntervalSeconds
+if ($Config.IntervalSeconds -lt 10) {
+    $Config.IntervalSeconds = 60
+}
+
 # Exit if SharedPath not configured
 if (-not $Config.SharedPath) {
     exit 0
 }
 
-# Single instance check - exit if another SyncMetrics is already running
-$currentPid = $PID
-$existingProcs = Get-Process -Name "SyncMetrics" -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $currentPid }
-if ($existingProcs) {
+# Single instance protection via named mutex
+$Script:Mutex = New-Object System.Threading.Mutex($false, "Global\WorkstationMonitorSync")
+$Script:MutexAcquired = $false
+try {
+    $Script:MutexAcquired = $Script:Mutex.WaitOne(0)
+} catch [System.Threading.AbandonedMutexException] {
+    $Script:MutexAcquired = $true
+}
+if (-not $Script:MutexAcquired) {
+    $Script:Mutex.Dispose()
     exit 0
 }
 
@@ -67,18 +78,23 @@ function Write-SyncLog {
 Write-SyncLog "SyncMetrics starting - SharedPath: $($Config.SharedPath)"
 
 # Sync loop
-while ($true) {
-    try {
-        $localFile = Join-Path $Config.OutputPath "metrics.json"
-        if ((Test-Path $localFile) -and (Test-Path $Config.SharedPath)) {
-            $sharedFile = Join-Path $Config.SharedPath "$($env:COMPUTERNAME).json"
-            Copy-Item -Path $localFile -Destination $sharedFile -Force
-        } elseif (-not (Test-Path $Config.SharedPath)) {
-            Write-SyncLog "SharedPath not accessible: $($Config.SharedPath)" "WARN"
+try {
+    while ($true) {
+        try {
+            $localFile = Join-Path $Config.OutputPath "metrics.json"
+            if ((Test-Path $localFile) -and (Test-Path $Config.SharedPath)) {
+                $sharedFile = Join-Path $Config.SharedPath "$($env:COMPUTERNAME).json"
+                Copy-Item -Path $localFile -Destination $sharedFile -Force
+            } elseif (-not (Test-Path $Config.SharedPath)) {
+                Write-SyncLog "SharedPath not accessible: $($Config.SharedPath)" "WARN"
+            }
+        } catch {
+            Write-SyncLog "Sync failed: $_" "ERROR"
         }
-    } catch {
-        Write-SyncLog "Sync failed: $_" "ERROR"
-    }
 
-    Start-Sleep -Seconds $Config.IntervalSeconds
+        Start-Sleep -Seconds $Config.IntervalSeconds
+    }
+} finally {
+    if ($Script:MutexAcquired) { $Script:Mutex.ReleaseMutex() }
+    $Script:Mutex.Dispose()
 }
