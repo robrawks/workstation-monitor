@@ -17,8 +17,11 @@
     # Start on different port
     .\Dashboard.ps1 -Port 9090
 
-    # View metrics from shared network path
+    # View metrics from shared network path (legacy)
     .\Dashboard.ps1 -SharedPath "\\server\metrics"
+
+    # Pull metrics from workstations via SMB shares
+    .\Dashboard.ps1 -WorkstationsFile ".\workstations.txt"
 
 .NOTES
     Author: Your IT Team
@@ -29,7 +32,8 @@
 param(
     [int]$Port = 9090,
     [string]$DataPath = "$env:ProgramData\WorkstationMonitor",
-    [string]$SharedPath = ""
+    [string]$SharedPath = "",
+    [string]$WorkstationsFile = ""
 )
 
 # =============================================================================
@@ -924,7 +928,7 @@ $DashboardHTML = @'
                 
                 // Latency rows
                 const latencyRows = (m.Latency || []).map(lat => {
-                    const latClass = getStatusClass(lat.AvgLatency_ms, 50, 100);
+                    const latClass = getStatusClass(lat.AvgLatency_ms, CONFIG.thresholds.latency.warning, CONFIG.thresholds.latency.critical);
                     return `
                         <div class="latency-row">
                             <span class="latency-target">${escapeHtml(lat.Target)}</span>
@@ -1263,11 +1267,65 @@ $DashboardHTML = @'
 # HTTP Server
 # =============================================================================
 
+function Get-WorkstationList {
+    param([string]$FilePath)
+    if (-not $FilePath -or -not (Test-Path $FilePath)) { return @() }
+    $hostnames = @()
+    Get-Content $FilePath | ForEach-Object {
+        $line = $_.Trim()
+        if ($line -and -not $line.StartsWith('#')) {
+            $hostnames += $line
+        }
+    }
+    return $hostnames
+}
+
+function Get-WorkstationMetrics {
+    param([string[]]$Hostnames)
+    if (-not $Hostnames -or $Hostnames.Count -eq 0) { return @() }
+
+    # Launch parallel jobs to read from each workstation's SMB share
+    $jobs = @()
+    foreach ($hostname in $Hostnames) {
+        # Skip local hostname to avoid double-count
+        if ($hostname -eq $env:COMPUTERNAME) { continue }
+        $jobs += Start-Job -ScriptBlock {
+            param($h)
+            $path = "\\$h\WsMonitor$\metrics.json"
+            try {
+                if (Test-Path $path) {
+                    $json = Get-Content $path -Raw -ErrorAction Stop
+                    return $json
+                }
+            } catch { }
+            return $null
+        } -ArgumentList $hostname
+    }
+
+    $results = @()
+    if ($jobs.Count -gt 0) {
+        # Wait up to 3 seconds for all jobs (parallel, so worst case = 3s total)
+        $jobs | Wait-Job -Timeout 3 | Out-Null
+        foreach ($job in $jobs) {
+            try {
+                $output = Receive-Job -Job $job -ErrorAction SilentlyContinue
+                if ($output) {
+                    $metrics = $output | ConvertFrom-Json
+                    $results += ,$metrics
+                }
+            } catch { }
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        }
+    }
+    return $results
+}
+
 function Start-DashboardServer {
     param(
         [int]$Port,
         [string]$DataPath,
-        [string]$SharedPath
+        [string]$SharedPath,
+        [string]$WorkstationsFile
     )
     
     # Create HTTP listener
@@ -1292,7 +1350,9 @@ function Start-DashboardServer {
     Write-Host "http://localhost:$Port" -ForegroundColor Green
     Write-Host ""
     Write-Host "Data path: $DataPath"
-    if ($SharedPath) {
+    if ($WorkstationsFile) {
+        Write-Host "Workstations file: $WorkstationsFile"
+    } elseif ($SharedPath) {
         Write-Host "Shared path: $SharedPath"
     }
     Write-Host ""
@@ -1322,8 +1382,8 @@ function Start-DashboardServer {
                 "/api/metrics" {
                     # Return metrics as JSON array
                     $metricsList = @()
-                    
-                    # Load local metrics
+
+                    # 1. Always load local metrics first
                     $localFile = Join-Path $DataPath "metrics.json"
                     if (Test-Path $localFile) {
                         try {
@@ -1334,13 +1394,23 @@ function Start-DashboardServer {
                             Write-Warning "Failed to read local metrics: $_"
                         }
                     }
-                    
-                    # Load shared metrics if configured
-                    if ($SharedPath -and (Test-Path $SharedPath)) {
+
+                    # 2. If WorkstationsFile set: pull from workstation shares
+                    if ($WorkstationsFile) {
+                        $hostnames = Get-WorkstationList -FilePath $WorkstationsFile
+                        if ($hostnames.Count -gt 0) {
+                            $remoteMetrics = Get-WorkstationMetrics -Hostnames $hostnames
+                            foreach ($m in $remoteMetrics) {
+                                $metricsList += ,$m
+                            }
+                        }
+                    }
+                    # 3. Else if SharedPath set: legacy shared folder mode
+                    elseif ($SharedPath -and (Test-Path $SharedPath)) {
                         Get-ChildItem -Path $SharedPath -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
                             # Skip if this is the local machine's file (already loaded)
                             if ($_.BaseName -eq $env:COMPUTERNAME) { return }
-                            
+
                             try {
                                 $sharedMetrics = Get-Content $_.FullName -Raw | ConvertFrom-Json
                                 $metricsList += ,$sharedMetrics
@@ -1350,7 +1420,7 @@ function Start-DashboardServer {
                             }
                         }
                     }
-                    
+
                     # Build JSON manually to ensure array format
                     if ($metricsList.Count -eq 0) {
                         $json = "[]"
@@ -1360,7 +1430,7 @@ function Start-DashboardServer {
                     } else {
                         $json = ConvertTo-Json -InputObject $metricsList -Depth 10
                     }
-                    
+
                     $buffer = [System.Text.Encoding]::UTF8.GetBytes($json)
                     $response.ContentType = "application/json"
                     $response.ContentLength64 = $buffer.Length
@@ -1409,5 +1479,26 @@ function Start-DashboardServer {
 # Hardcode values for EXE compilation (ps2exe doesn't handle param defaults)
 if (-not $Port) { $Port = 9090 }
 if (-not $SharedPath) { $SharedPath = "" }
+if (-not $WorkstationsFile) { $WorkstationsFile = "" }
 
-Start-DashboardServer -Port $Port -DataPath $DataPath -SharedPath $SharedPath
+# Auto-discover workstations.txt alongside the exe/script
+if (-not $WorkstationsFile) {
+    $ScriptDir = $null
+    try {
+        $exePath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        if ($exePath -and (Test-Path $exePath)) {
+            $ScriptDir = [System.IO.Path]::GetDirectoryName($exePath)
+        }
+    } catch { }
+    if (-not $ScriptDir -or $ScriptDir -like "*powershell*" -or $ScriptDir -like "*System32*") {
+        if ($PSScriptRoot) { $ScriptDir = $PSScriptRoot }
+    }
+    if ($ScriptDir) {
+        $autoFile = Join-Path $ScriptDir "workstations.txt"
+        if (Test-Path $autoFile) {
+            $WorkstationsFile = $autoFile
+        }
+    }
+}
+
+Start-DashboardServer -Port $Port -DataPath $DataPath -SharedPath $SharedPath -WorkstationsFile $WorkstationsFile

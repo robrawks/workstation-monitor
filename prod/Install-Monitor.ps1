@@ -4,10 +4,10 @@
 
 .DESCRIPTION
     Creates a Windows Scheduled Task that:
-    - Starts WorkstationMonitor.exe at user logon
+    - Starts WorkstationMonitor.exe at system startup (runs as SYSTEM)
     - Runs hidden in the background
     - Restarts if it crashes
-    - Runs as the current user (no admin needed for basic install)
+    - Runs as NT AUTHORITY\SYSTEM (persists across user sessions)
 
 .PARAMETER Uninstall
     Remove the scheduled task and stop the monitor
@@ -42,10 +42,16 @@ if ($Uninstall) {
     # Stop any running instance
     Get-Process -Name "WorkstationMonitor" -ErrorAction SilentlyContinue | Stop-Process -Force
     
-    # Remove scheduled task
+    # Remove scheduled tasks
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-    
-    Write-Host "  Scheduled task removed" -ForegroundColor Green
+    Unregister-ScheduledTask -TaskName "${TaskName}Sync" -Confirm:$false -ErrorAction SilentlyContinue
+
+    # Remove SMB share
+    if (Get-SmbShare -Name "WsMonitor$" -ErrorAction SilentlyContinue) {
+        Remove-SmbShare -Name "WsMonitor$" -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-Host "  Scheduled task and share removed" -ForegroundColor Green
     Write-Host ""
     Write-Host "Uninstall complete." -ForegroundColor Green
     Write-Host "Data preserved in: $InstallPath" -ForegroundColor Gray
@@ -61,14 +67,14 @@ if (-not (Test-Path $ExePath)) {
 }
 
 # Step 1: Create install directory
-Write-Host "[1/5] Creating installation directory..." -ForegroundColor Yellow
+Write-Host "[1/6] Creating installation directory..." -ForegroundColor Yellow
 if (-not (Test-Path $InstallPath)) {
     New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
 }
 Write-Host "      $InstallPath" -ForegroundColor Green
 
 # Step 2: Set secure folder permissions (Security Fix)
-Write-Host "[2/5] Setting secure folder permissions..." -ForegroundColor Yellow
+Write-Host "[2/6] Setting secure folder permissions..." -ForegroundColor Yellow
 try {
     $acl = Get-Acl $InstallPath
     # Remove inherited permissions and start fresh
@@ -85,23 +91,41 @@ try {
     $userRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
         $env:USERNAME, "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")
     $acl.AddAccessRule($userRule)
+    # Authenticated Users need read access for SMB share
+    $authRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        "NT AUTHORITY\Authenticated Users", "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")
+    $acl.AddAccessRule($authRule)
     Set-Acl -Path $InstallPath -AclObject $acl
-    Write-Host "      Folder secured (Admins + current user only)" -ForegroundColor Green
+    Write-Host "      Folder secured (Admins + current user + Authenticated Users read)" -ForegroundColor Green
 }
 catch {
     Write-Host "      Warning: Could not set ACLs (non-critical)" -ForegroundColor Yellow
 }
 
-# Step 3: Copy files
-Write-Host "[3/5] Copying files..." -ForegroundColor Yellow
+# Step 3: Create hidden SMB share for pull-based metrics collection
+Write-Host "[3/6] Creating hidden SMB share (WsMonitor$)..." -ForegroundColor Yellow
+try {
+    # Remove existing share if present (idempotent)
+    if (Get-SmbShare -Name "WsMonitor$" -ErrorAction SilentlyContinue) {
+        Remove-SmbShare -Name "WsMonitor$" -Force -ErrorAction SilentlyContinue
+    }
+    New-SmbShare -Name "WsMonitor$" -Path $InstallPath -ReadAccess "NT AUTHORITY\Authenticated Users" | Out-Null
+    Write-Host "      Share \\$env:COMPUTERNAME\WsMonitor$ created (read-only)" -ForegroundColor Green
+}
+catch {
+    Write-Host "      Warning: Could not create SMB share (non-critical): $_" -ForegroundColor Yellow
+}
+
+# Step 4: Copy files
+Write-Host "[4/6] Copying files..." -ForegroundColor Yellow
 Copy-Item -Path $ExePath -Destination $InstallPath -Force
 if (Test-Path $ConfigPath) {
     Copy-Item -Path $ConfigPath -Destination $InstallPath -Force
 }
 Write-Host "      Files copied" -ForegroundColor Green
 
-# Step 4: Create scheduled task
-Write-Host "[4/5] Creating scheduled task..." -ForegroundColor Yellow
+# Step 5: Create scheduled task
+Write-Host "[5/6] Creating scheduled task..." -ForegroundColor Yellow
 
 $InstalledExe = Join-Path $InstallPath "WorkstationMonitor.exe"
 
@@ -115,8 +139,14 @@ try {
     # Create the action - run the EXE from the install path
     $Action = New-ScheduledTaskAction -Execute $InstalledExe -WorkingDirectory $InstallPath
 
-    # Trigger: at user logon (runs as logged-in user for share access)
-    $Trigger = New-ScheduledTaskTrigger -AtLogon
+    # Trigger: at system startup (runs as SYSTEM, independent of user sessions)
+    $Trigger = New-ScheduledTaskTrigger -AtStartup
+
+    # Run as SYSTEM - persists across user logon/logoff, survives reboots
+    $Principal = New-ScheduledTaskPrincipal `
+        -UserId "NT AUTHORITY\SYSTEM" `
+        -LogonType ServiceAccount `
+        -RunLevel Highest
 
     # Settings for reliable background operation
     $Settings = New-ScheduledTaskSettingsSet `
@@ -132,9 +162,10 @@ try {
         -Action $Action `
         -Trigger $Trigger `
         -Settings $Settings `
+        -Principal $Principal `
         -Description "Workstation Monitor - Background performance monitoring" | Out-Null
 
-    Write-Host "      Scheduled task created (runs at user logon)" -ForegroundColor Green
+    Write-Host "      Scheduled task created (runs at system startup as SYSTEM)" -ForegroundColor Green
 }
 catch {
     Write-Warning "Could not create scheduled task automatically."
@@ -158,8 +189,8 @@ catch {
     Write-Host "Created startup shortcut instead: $ShortcutPath" -ForegroundColor Cyan
 }
 
-# Step 5: Create helper shortcuts
-Write-Host "[5/5] Creating shortcuts..." -ForegroundColor Yellow
+# Step 6: Create helper shortcuts
+Write-Host "[6/6] Creating shortcuts..." -ForegroundColor Yellow
 
 # Stop Monitor shortcut
 $StopScript = @'
@@ -187,9 +218,11 @@ Write-Host ""
 Write-Host "Install location: $InstallPath" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "The monitor will:" -ForegroundColor Yellow
-Write-Host "  - Start automatically when any user logs in" -ForegroundColor White
+Write-Host "  - Start automatically at system boot (runs as SYSTEM)" -ForegroundColor White
+Write-Host "  - Persist across all user sessions (admin, rad, etc.)" -ForegroundColor White
 Write-Host "  - Run silently in the background" -ForegroundColor White
 Write-Host "  - Save metrics to $InstallPath" -ForegroundColor White
+Write-Host "  - Serve metrics via \\$env:COMPUTERNAME\WsMonitor`$ (read-only)" -ForegroundColor White
 Write-Host ""
 
 # Start now if requested
@@ -215,7 +248,7 @@ else {
     Write-Host "To start now, run:" -ForegroundColor Yellow
     Write-Host "  Start-ScheduledTask -TaskName 'WorkstationMonitor'" -ForegroundColor Gray
     Write-Host ""
-    Write-Host "Or just log out and back in." -ForegroundColor Gray
+    Write-Host "Or restart the computer." -ForegroundColor Gray
 }
 
 Write-Host ""

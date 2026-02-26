@@ -71,6 +71,11 @@ $Script:Config = @{
     RunOnce = $DefaultConfig.RunOnce
 }
 
+# Validate IntervalSeconds - prevent tight spin loops
+if ($Script:Config.IntervalSeconds -lt 10) {
+    $Script:Config.IntervalSeconds = 60
+}
+
 # =============================================================================
 # Logging Function (for background operation)
 # =============================================================================
@@ -302,7 +307,7 @@ function Get-LatencyMetrics {
     param([string]$Target)
     
     try {
-        $pings = Test-Connection -ComputerName $Target -Count 4 -ErrorAction SilentlyContinue
+        $pings = Test-Connection -ComputerName $Target -Count 2 -ErrorAction SilentlyContinue
         
         if ($pings) {
             $latencies = $pings | ForEach-Object { $_.ResponseTime }
@@ -310,7 +315,7 @@ function Get-LatencyMetrics {
             $min = [math]::Round(($latencies | Measure-Object -Minimum).Minimum, 1)
             $max = [math]::Round(($latencies | Measure-Object -Maximum).Maximum, 1)
             $jitter = [math]::Round($max - $min, 1)
-            $loss = [math]::Round((1 - ($pings.Count / 4)) * 100, 0)
+            $loss = [math]::Round((1 - ($pings.Count / 2)) * 100, 0)
             
             return @{
                 Target = $Target
@@ -342,18 +347,25 @@ function Get-LatencyMetrics {
 
 function Test-DicomConnectivity {
     param([string]$HostName, [int]$Port)
-    
+
     try {
         $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-        $result = Test-NetConnection -ComputerName $HostName -Port $Port -WarningAction SilentlyContinue
+        $tcpClient = New-Object System.Net.Sockets.TcpClient
+        $connectTask = $tcpClient.ConnectAsync($HostName, $Port)
+        $connected = $connectTask.Wait(5000)  # 5 second timeout
         $stopwatch.Stop()
-        
-        return @{
+
+        $result = @{
             Host = $HostName
             Port = $Port
-            IsReachable = $result.TcpTestSucceeded
+            IsReachable = $connected -and $tcpClient.Connected
             ConnectionTime_ms = $stopwatch.ElapsedMilliseconds
         }
+
+        $tcpClient.Close()
+        $tcpClient.Dispose()
+
+        return $result
     }
     catch {
         return @{
@@ -496,14 +508,8 @@ function Save-Metrics {
     $history = $null
     #>
 
-    if ($Script:Config.SharedPath -and (Test-Path $Script:Config.SharedPath)) {
-        try {
-            $sharedFile = Join-Path $Script:Config.SharedPath "$($env:COMPUTERNAME).json"
-            $Metrics | ConvertTo-Json -Depth 10 | Set-Content $sharedFile -Force
-        } catch {
-            Write-Log "Failed to save to shared path: $_" "WARN"
-        }
-    }
+    # SharedPath sync is handled by SyncMetrics.exe (runs as logged-in user)
+    # The monitor runs as SYSTEM which typically cannot access network shares
 }
 
 # =============================================================================
@@ -513,6 +519,19 @@ function Save-Metrics {
 # Ensure output directory exists
 if (-not (Test-Path $Script:Config.OutputPath)) {
     New-Item -ItemType Directory -Path $Script:Config.OutputPath -Force | Out-Null
+}
+
+# Single instance protection - prevent duplicate monitors from corrupting data
+$Script:Mutex = New-Object System.Threading.Mutex($false, "Global\WorkstationMonitor")
+$Script:MutexAcquired = $false
+try {
+    $Script:MutexAcquired = $Script:Mutex.WaitOne(0)
+} catch [System.Threading.AbandonedMutexException] {
+    $Script:MutexAcquired = $true
+}
+if (-not $Script:MutexAcquired) {
+    $Script:Mutex.Dispose()
+    exit 1
 }
 
 Write-Log "WorkstationMonitor starting (Version $($Script:Config.Version))"
@@ -540,27 +559,30 @@ if ($Script:Config.RunOnce) {
 
 # Continuous monitoring mode (background)
 $Script:LoopCount = 0
-while ($true) {
-    try {
-        $metrics = Get-AllMetrics
-        Save-Metrics -Metrics $metrics
-        Write-Log "Collected: CPU=$($metrics.CPU.OverallPercent)% RAM=$($metrics.Memory.PercentUsed)%"
-    }
-    catch {
-        Write-Log "Collection error: $_" "ERROR"
-    }
+try {
+    while ($true) {
+        try {
+            $metrics = Get-AllMetrics
+            Save-Metrics -Metrics $metrics
+            Write-Log "Collected: CPU=$($metrics.CPU.OverallPercent)% RAM=$($metrics.Memory.PercentUsed)%"
+        }
+        catch {
+            Write-Log "Collection error: $_" "ERROR"
+        }
 
-    # Aggressive cleanup to prevent memory leak
-    $metrics = $null
-    $Script:LoopCount++
+        # Aggressive cleanup to prevent memory leak
+        $metrics = $null
+        $Script:LoopCount++
 
-    # Force GC every cycle, full collection every 10 cycles
-    if ($Script:LoopCount % 10 -eq 0) {
-        [System.GC]::Collect(2, [System.GCCollectionMode]::Forced, $true)
-        [System.GC]::WaitForPendingFinalizers()
-    } else {
-        [System.GC]::Collect()
+        # Force GC every 50 cycles only
+        if ($Script:LoopCount % 50 -eq 0) {
+            [System.GC]::Collect(2, [System.GCCollectionMode]::Forced, $true)
+            [System.GC]::WaitForPendingFinalizers()
+        }
+
+        Start-Sleep -Seconds $Script:Config.IntervalSeconds
     }
-
-    Start-Sleep -Seconds $Script:Config.IntervalSeconds
+} finally {
+    if ($Script:MutexAcquired) { $Script:Mutex.ReleaseMutex() }
+    $Script:Mutex.Dispose()
 }
